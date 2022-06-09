@@ -28,7 +28,7 @@ class IncorrectCmapInstanceType(Exception):
 
     def __init__(self, type) -> None:
         super().__init__(
-            f"Colormap type provide: {type}. Expected the type to be a LinearSegmentedColormap. Other types may be supported in future releases"
+            f"Colormap type provide: {type}. Expected the type to be a LinearSegmentedColormap or None. Other types may be supported in future releases"
         )
 
 
@@ -45,6 +45,7 @@ T = TypeVar("T", bound="ColorMapper")
 
 @dataclass
 class ColorMapper:
+
     # This attribute is a list of hex colors
     color_list: list[str]
 
@@ -71,10 +72,11 @@ class ColorMapper:
                 Returns a ColorMapper object that has a color_list attribute that is the list of different colors
         """
         # if the cmap_var is the instance of the wrong type then we raise an error
+
         if not isinstance(cmap_var, numbers.Number):
             raise IncorrectCmapVarType(type(cmap_var))
         # if the cmap is not the LinearSegmentedColormap then we will raise an error
-        if not isinstance(cmap, colors.LinearSegmentedColormap):
+        if not (isinstance(cmap, colors.LinearSegmentedColormap) or cmap == None):
             raise IncorrectCmapInstanceType(type(cmap))
         # If there is no cmap then we will we just use the Greys_r colormap
         if not cmap:
@@ -203,6 +205,57 @@ class Manhattan:
                 f"{len(missing_cols)} columns were missing from the association dataframe. Expeccted it to have the columns {', '.join(necessary_cols)}"
             )
 
+    @staticmethod
+    def _convert_columns(df_assoc: pd.DataFrame, column_name: str, type_conversion: Any) -> None:
+        """Staticmethod that will attempt to convert the column to a type
+        Parameters
+        ----------
+        df_assoc : pd.DataFrame
+            dataframe that has the results of the association analysis
+        
+        column_name : str
+            column to be converted
+        
+        type_conversion : Any
+            This is the type the user wants to convert the column to. It could be str, 
+            int, float, or others
+        """
+        # we are going to try to convert the column to the right type but it may fail and we need to catch that
+        try:
+            df_assoc[column_name] = df_assoc[column_name].astype(type_conversion)
+        except ValueError as e:
+            print(f"There was an error trying to convert the column {column_name} to type {type_conversion}. The traceback is shown below:\n {e}")
+    
+    @staticmethod
+    def _generate_individ_indx(assoc_df: pd.DataFrame, chromo_col: str) -> list[int]:
+        """Staticmethod that will create an integer list for each variant in 
+        the file. It adds a weight to adjust scale of the list
+
+        Parameters
+        ----------
+        assoc_data : pd.DataFrame
+                Pandas dataframe that has the at least three columns for the chromosome, the base position, and the pvalue
+
+        chromo_col : str
+            column that has the chromosome values in it.
+        Returns
+        -------
+        list[int]
+            list that has indices for each variant plus a weight component for different chromosomes
+        """
+        list_ind = []
+
+        for chromo, assoc_data in assoc_df.groupby(by=chromo_col):
+            print(f"_generating_individuals for {chromo} \n {assoc_data}")
+            break
+            # if len(list_ind) == 0:
+            #     last_ind = 0
+            # else:
+            #     last_ind = (list_ind[-1] + 1) + (gap * weight_gap)
+
+            # list_ind += [
+            #     last_ind + num for num in range(len(df_assoc[df_assoc[col_chr] == cChr]))
+            # ]
     def plot(self, assoc_data: pd.DataFrame) -> None:
         """Method to plot the Manhattan plot
         Parameters
@@ -210,8 +263,27 @@ class Manhattan:
         assoc_data : pd.DataFrame
                 Pandas dataframe that has the at least three columns for the chromosome, the base position, and the pvalue
         """
+        print(assoc_data)
+        # first make sure all the necessary columns are present
         self._check_columns(assoc_data)
+        # WE are going to convert each column to the appropriate type. A ValueError will be 
+        # raised if it fails
+        self._convert_columns(assoc_data, self.internal_parameters["chr_col"], "category")
+        self._convert_columns(assoc_data, self.internal_parameters["bp_col"], int)
+        self._convert_columns(assoc_data, self.internal_parameters["pvalue_col"], float)
+        # self._convert_columns(assoc_data, self.internal_parameters["chr_col"], "category")
+        # we are going to create a dictionary that has the counts for how 
+        # many variants each chromosome has
+        variant_counts = {}
+        # iterate over each unique value
+        for chr_val in assoc_data[self.internal_parameters["chr_col"]].unique():
+            variant_counts[chr_val] = assoc_data[assoc_data[self.internal_parameters["chr_col"]] == chr_val].shape[0]
 
+        print(variant_counts)
+        # making a weight that corresponds to the smallest number of variants per chromosome
+        weight_gap = int(min(variant_counts.values()) / 100)
+
+        self._generate_individ_indx(assoc_data, self.internal_parameters["chr_col"])
 
 #################################################################################################################
 # Function that is responsible for creating the manhattan plot
@@ -283,32 +355,34 @@ def manhattan(
     if not (ax or show or out):
         raise Exception("[ERROR]: Either of the ax, show, and out must have a value.")
     isAx = not ax
-    if isinstance(assoc, str):
-        df_assoc = pd.read_csv(assoc, header=0, delim_whitespace=True)
-    elif isinstance(assoc, pd.DataFrame):
-        df_assoc = assoc
-    else:
-        raise Exception(
-            "[ERROR]: assoc must be either string(path) or pandas.DataFrame."
-        )
+    # if isinstance(assoc, str):
+    #     df_assoc = pd.read_csv(assoc, header=0, delim_whitespace=True)
+    # elif isinstance(assoc, pd.DataFrame):
+    #     df_assoc = assoc
+    # else:
+    #     raise Exception(
+    #         "[ERROR]: assoc must be either string(path) or pandas.DataFrame."
+    #     )
 
-    if col_chr not in df_assoc.columns:
-        raise Exception("[ERROR]: Column '{0}' not found!".format(col_chr))
-    if col_bp not in df_assoc.columns:
-        raise Exception("[ERROR]: Column '{0}' not found!".format(col_bp))
-    if col_p not in df_assoc.columns:
-        raise Exception("[ERROR]: Column '{0}' not found!".format(col_p))
+    # if col_chr not in df_assoc.columns:
+    #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_chr))
+    # if col_bp not in df_assoc.columns:
+    #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_bp))
+    # if col_p not in df_assoc.columns:
+    #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_p))
     if col_snp not in df_assoc.columns:
         print("[WARNING]: Column '{0}' not found!".format(col_snp))
 
-    df_assoc[col_chr] = df_assoc[col_chr].astype("category")
-    df_assoc[col_bp] = df_assoc[col_bp].astype(int)
-    df_assoc[col_p] = df_assoc[col_p].astype(float)
-    df_assoc = df_assoc.sort_values([col_chr, col_bp])
-
+    # df_assoc[col_chr] = df_assoc[col_chr].astype("category")
+    # df_assoc[col_bp] = df_assoc[col_bp].astype(int)
+    # df_assoc[col_p] = df_assoc[col_p].astype(float)
+    # df_assoc = df_assoc.sort_values([col_chr, col_bp])
+    # we are appeniding the number of variants for each chromosome to this list
     chr_len = list()
+
     for cChr in df_assoc[col_chr].unique():
         chr_len.append(len(df_assoc[df_assoc[col_chr] == cChr]))
+    # We are then creaing a weight for the gaps by taking the min_value/100 and converting to an int
     weight_gap = int(min(chr_len) / 100)
 
     list_ind = list()

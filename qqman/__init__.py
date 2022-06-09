@@ -1,2 +1,2 @@
 name = "qqman"
-from . import qqman
+from .qqman import Manhattan, ColorMapper

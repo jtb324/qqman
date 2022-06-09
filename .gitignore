@@ -135,3 +135,6 @@ qqman/*.jpeg
 qqman/*.gif
 qqman/*.tif
 qqman/*.tiff
+
+# Testing files
+*.ipynb
