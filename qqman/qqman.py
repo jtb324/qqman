@@ -4,7 +4,10 @@ import traceback
 import logging
 import numbers
 import pandas as pd
+import seaborn as sns
 import numpy as np
+from numpy import where
+import os
 
 import matplotlib.pyplot as plt
 from matplotlib import colors
@@ -48,6 +51,7 @@ class ColorMapper:
 
     # This attribute is a list of hex colors
     color_list: list[str]
+    cmap_var: int 
 
     @classmethod
     def create_mapper(
@@ -91,14 +95,14 @@ class ColorMapper:
             case 2:
                 color_list = [colors.to_hex(cmap(0)[:3]), colors.to_hex(cmap(80)[:3])]
 
-                return cls(color_list)
+                return cls(color_list, cmap_var)
             # if the cmap var != 2 then we we create a step and iterate over the colors in the cmap
             case _:
                 step = int(256 / cmap_var)
                 for i in range(256):
                     if i % step == 0:
                         color_list.append(colors.to_hex(cmap(i)[:3]))
-                return cls(color_list)
+                return cls(color_list, cmap_var)
 
 
 @dataclass
@@ -124,7 +128,7 @@ class Manhattan:
         self,
         chr_col: str = "CHR",
         bp_col: str = "BP",
-        pvalue_col: str = "P",
+        pvalue_col: str = "P-value",
         snp_col: str = "SNP",
     ) -> None:
         """function that will add the columns to the internal parameters dictionary"""
@@ -182,6 +186,21 @@ class Manhattan:
         self.internal_parameters["label_size"] = label_size
         self.internal_parameters["title_size"] = title_size
 
+    def set_suggestive_lines(self, suggestive: float = -np.log10(1e-5), genomewide: float = -np.log10(5e-8)) -> None:
+        """Method that will add parameters for the suggestive line and genome 
+        wide significance
+
+        Parameters
+        ----------
+        suggestive : float
+            line for suggestive significance 
+
+        genomewide : float
+            line for genomewide significance
+        """
+        self.internal_parameters["suggestive"] = suggestive
+        self.internal_parameters["genomewide"] = genomewide
+
     def _check_columns(self, assoc_data: pd.DataFrame) -> None:
         """Method that will make sure the necessary columns are in the dataframe
         Parameters
@@ -202,7 +221,7 @@ class Manhattan:
 
         if missing_cols:
             raise RequiredColumnsNotFound(
-                f"{len(missing_cols)} columns were missing from the association dataframe. Expeccted it to have the columns {', '.join(necessary_cols)}"
+                f"{len(missing_cols)} columns were missing from the association dataframe. Expected it to have the columns {', '.join(necessary_cols)}"
             )
 
     @staticmethod
@@ -227,7 +246,7 @@ class Manhattan:
             print(f"There was an error trying to convert the column {column_name} to type {type_conversion}. The traceback is shown below:\n {e}")
     
     @staticmethod
-    def _generate_individ_indx(assoc_df: pd.DataFrame, chromo_col: str) -> list[int]:
+    def _generate_individ_indx(assoc_df: pd.DataFrame, chromo_col: str, weight_gap: int) -> list[int]:
         """Staticmethod that will create an integer list for each variant in 
         the file. It adds a weight to adjust scale of the list
 
@@ -246,16 +265,20 @@ class Manhattan:
         list_ind = []
 
         for chromo, assoc_data in assoc_df.groupby(by=chromo_col):
-            print(f"_generating_individuals for {chromo} \n {assoc_data}")
-            break
-            # if len(list_ind) == 0:
-            #     last_ind = 0
-            # else:
-            #     last_ind = (list_ind[-1] + 1) + (gap * weight_gap)
 
-            # list_ind += [
-            #     last_ind + num for num in range(len(df_assoc[df_assoc[col_chr] == cChr]))
-            # ]
+            if len(list_ind) == 0:
+
+                last_ind = 0
+            else:
+                last_ind = (list_ind[-1] + 1) + (10 * weight_gap)
+
+            list_ind += [
+                    last_ind + num for num in range(assoc_data.shape[0])
+                ]
+        
+        return list_ind
+
+
     def plot(self, assoc_data: pd.DataFrame) -> None:
         """Method to plot the Manhattan plot
         Parameters
@@ -263,7 +286,6 @@ class Manhattan:
         assoc_data : pd.DataFrame
                 Pandas dataframe that has the at least three columns for the chromosome, the base position, and the pvalue
         """
-        print(assoc_data)
         # first make sure all the necessary columns are present
         self._check_columns(assoc_data)
         # WE are going to convert each column to the appropriate type. A ValueError will be 
@@ -271,191 +293,288 @@ class Manhattan:
         self._convert_columns(assoc_data, self.internal_parameters["chr_col"], "category")
         self._convert_columns(assoc_data, self.internal_parameters["bp_col"], int)
         self._convert_columns(assoc_data, self.internal_parameters["pvalue_col"], float)
-        # self._convert_columns(assoc_data, self.internal_parameters["chr_col"], "category")
-        # we are going to create a dictionary that has the counts for how 
-        # many variants each chromosome has
-        variant_counts = {}
-        # iterate over each unique value
-        for chr_val in assoc_data[self.internal_parameters["chr_col"]].unique():
-            variant_counts[chr_val] = assoc_data[assoc_data[self.internal_parameters["chr_col"]] == chr_val].shape[0]
 
-        print(variant_counts)
-        # making a weight that corresponds to the smallest number of variants per chromosome
-        weight_gap = int(min(variant_counts.values()) / 100)
+        assoc_data.loc[:,"LOG_P"] = -np.log10(assoc_data[self.internal_parameters["pvalue_col"]])
+        
+        running_pos = 0
+        cumulative_pos = []
 
-        self._generate_individ_indx(assoc_data, self.internal_parameters["chr_col"])
+        assoc_data.loc[:, "chr"] = where(assoc_data.chromosome.str.len() == 4, assoc_data.chromosome.str[-1], assoc_data.chromosome.str[-2:])
+        assoc_data = assoc_data.sort_values(by=["chr", "baseposition"])
+        assoc_data.reset_index(drop=True, inplace=True)
 
+        for chrom, group_df in assoc_data.groupby(self.internal_parameters["chr_col"]):  
+            cumulative_pos.append(group_df[self.internal_parameters["bp_col"]] + running_pos)
+            running_pos += group_df[self.internal_parameters["bp_col"]].max()
+
+        assoc_data.loc[:,"cumulative_pos"] = pd.concat(cumulative_pos)
+
+        print(assoc_data)
+
+        plot = sns.relplot(
+            data = assoc_data,
+            x = 'cumulative_pos',
+            y = 'LOG_P',
+            aspect = 4,
+            hue = "chromosome",
+            palette = "Greys_r",
+            linewidth=0,
+            s=6,
+            legend=None,
+        )
+
+        plot.ax.set_xlabel('Chromosome')
+
+        plot.ax.set_xticks(assoc_data.groupby('chromosome')['cumulative_pos'].median())
+
+        plot.ax.set_xticklabels(assoc_data['chromosome'].unique())
+
+        plot.fig.suptitle('GWAS plot showing association between SNPs on autosomes and speeding')
+        # creating the space for the figure
+        # fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 12))
+        # fig.tight_layout()
+        
+        # # we are going to create a dictionary that has the counts for how 
+        # # many variants each chromosome has
+        # variant_counts = {}
+        # # iterate over each unique value
+        # # for chr_val in assoc_data[self.internal_parameters["chr_col"]].unique():
+        # #     variant_counts[chr_val] = assoc_data[assoc_data[self.internal_parameters["chr_col"]] == chr_val].shape[0]
+        # # print(variant_counts)
+        # # making a weight that corresponds to the smallest number of variants per chromosome
+        # weight_gap = int(min(variant_counts.values()) / 100)
+
+        # list_ind = self._generate_individ_indx(assoc_data, self.internal_parameters["chr_col"], weight_gap)
+        # print(list_ind)
+
+        # assoc_data["IND"] = list_ind
+        # assoc_data["LOG_P"] = -np.log10(assoc_data[self.internal_parameters["pvalue_col"]])
+
+        # x_ticks, x_labels = list(), list()
+
+        # for i, cChr in enumerate(assoc_data[self.internal_parameters["chr_col"]].unique()):
+        #     ind = assoc_data[assoc_data[self.internal_parameters["chr_col"]] == cChr]["IND"]
+        #     log_p = assoc_data[assoc_data[self.internal_parameters["chr_col"]] == cChr]["LOG_P"]
+
+        #     ax.scatter(
+        #         ind, log_p, marker=".", s=5, color=self.colormap.color_list[i % self.colormap.cmap_var]
+        #     )
+        #     x_ticks.append(ind.iloc[0] + (ind.iloc[-1] - ind.iloc[0]) / 2)
+        #     x_labels.append(cChr)
+
+        # x_padding = len(list_ind) / 20
+        # xlim_min = list_ind[0] - x_padding
+        # xlim_max = list_ind[-1] + x_padding
+
+        # if self.internal_parameters["suggestive"]:
+        #     ax.plot([xlim_min, xlim_max], [self.internal_parameters["suggestive"], self.internal_parameters["suggestive"]], "b-")
+        # if self.internal_parameters["genomewide"]:
+        #     ax.plot([xlim_min, xlim_max], [self.internal_parameters["genomewide"], self.internal_parameters["genomewide"]], "r-")
+
+        # ax.spines["right"].set_visible(False)
+        # ax.spines["top"].set_visible(False)
+        # ax.spines["bottom"].set_visible(False)
+
+        # ax.set_xticks(x_ticks)
+        # ax.set_xticklabels(x_labels)
+        # # ax.set_ylim(bottom=0,top=math.floor(1+max(df_assoc["LOG_P"])+(max(df_assoc["LOG_P"])/100)))
+        # # ax.set_ylim(bottom=0,top=max(df_assoc["LOG_P"]))
+        # ax.set_ylim(bottom=0)
+        # ax.set_xlim([xlim_min, xlim_max])
+
+        # ax.tick_params(axis="x", labelsize=self.internal_parameters["xtick_size"], labelrotation=self.internal_parameters["xrotation"])
+        # ax.tick_params(axis="y", labelsize=self.internal_parameters["ytick_size"], labelrotation=self.internal_parameters["yrotation"])
+
+        # ax.set_xlabel("Chromosomes", fontsize=self.internal_parameters["label_size"])
+        # ax.set_ylabel(r"$-log_{10}(p)$", fontsize=self.internal_parameters["label_size"])
+
+        # title: str = self.internal_parameters["title"]
+        # if title:
+        #     ax.set_title(title, fontsize=self.internal_parameters["title_size"])
+
+        # # if isAx:
+        # #     fig.tight_layout()
+
+        # if self.internal_parameters["show"]:
+        #     plt.show()
+
+        # plt.savefig(os.path.join(self.output, title), format="png")
+
+        # plt.clf()
+        # plt.close()
+
+            
 #################################################################################################################
 # Function that is responsible for creating the manhattan plot
 
 
-def manhattan(
-    assoc,
-    out=False,
-    gap=10,
-    ax=False,
-    cmap=False,
-    cmap_var=2,
-    col_chr="CHR",
-    col_bp="BP",
-    col_p="P",
-    col_snp="SNP",
-    show=False,
-    title=False,
-    xtick_size=10,
-    ytick_size=10,
-    xrotation=0,
-    yrotation=0,
-    label_size=15,
-    title_size=20,
-    suggestiveline=-np.log10(1e-5),
-    genomewideline=-np.log10(5e-8),
-    **kwargs,
-):
+# def manhattan(
+#     assoc,
+#     out=False,
+#     gap=10,
+#     ax=False,
+#     cmap=False,
+#     cmap_var=2,
+#     col_chr="CHR",
+#     col_bp="BP",
+#     col_p="P",
+#     col_snp="SNP",
+#     show=False,
+#     title=False,
+#     xtick_size=10,
+#     ytick_size=10,
+#     xrotation=0,
+#     yrotation=0,
+#     label_size=15,
+#     title_size=20,
+#     suggestiveline=-np.log10(1e-5),
+#     genomewideline=-np.log10(5e-8),
+#     **kwargs,
+# ):
 
-    # # This command is making sure that the cmap_var is either an instance of a Number or a list
-    # if not (isinstance(cmap_var, numbers.Number) or isinstance(cmap_var, list)):
-    # 	raise Exception("[ERROR]: cmap_var should either be list or number.")
+#     # # This command is making sure that the cmap_var is either an instance of a Number or a list
+#     # if not (isinstance(cmap_var, numbers.Number) or isinstance(cmap_var, list)):
+#     # 	raise Exception("[ERROR]: cmap_var should either be list or number.")
 
-    # list_color = list()
-    # if cmap:
-    # 	try:
-    # 		if isinstance(cmap_var, numbers.Number):
-    # 			step = int(len(cmap.colors) / cmap_var)
+#     # list_color = list()
+#     # if cmap:
+#     # 	try:
+#     # 		if isinstance(cmap_var, numbers.Number):
+#     # 			step = int(len(cmap.colors) / cmap_var)
 
-    # 			for i, color in enumerate(cmap.colors):
-    # 				if i % step == 0:
-    # 					list_color.append(colors.to_hex(color))
-    # 		else:
-    # 			list_color = cmap_var
+#     # 			for i, color in enumerate(cmap.colors):
+#     # 				if i % step == 0:
+#     # 					list_color.append(colors.to_hex(color))
+#     # 		else:
+#     # 			list_color = cmap_var
 
-    # 	except AttributeError:
-    # 		if isinstance(cmap_var, numbers.Number):
-    # 			step = int(256 / cmap_var)
+#     # 	except AttributeError:
+#     # 		if isinstance(cmap_var, numbers.Number):
+#     # 			step = int(256 / cmap_var)
 
-    # 			for i in range(256):
-    # 				if i % step == 0:
-    # 					list_color.append(colors.to_hex(cmap(i)[:3]))
-    # 		else:
-    # 			list_color = cmap_var
-    # else:
-    # 	cmap = plt.get_cmap("Greys_r")
-    # 	if isinstance(cmap_var, numbers.Number):
-    # 		if cmap_var == 2:
-    # 			list_color = [colors.to_hex(cmap(0)[:3]), colors.to_hex(cmap(80)[:3])]
-    # 		else:
-    # 			step = int(256 / cmap_var)
+#     # 			for i in range(256):
+#     # 				if i % step == 0:
+#     # 					list_color.append(colors.to_hex(cmap(i)[:3]))
+#     # 		else:
+#     # 			list_color = cmap_var
+#     # else:
+#     # 	cmap = plt.get_cmap("Greys_r")
+#     # 	if isinstance(cmap_var, numbers.Number):
+#     # 		if cmap_var == 2:
+#     # 			list_color = [colors.to_hex(cmap(0)[:3]), colors.to_hex(cmap(80)[:3])]
+#     # 		else:
+#     # 			step = int(256 / cmap_var)
 
-    # 			for i in range(256):
-    # 				if i % step == 0:
-    # 					list_color.append(colors.to_hex(cmap(i)[:3]))
-    # 	else:
-    # 		list_color = cmap_var
+#     # 			for i in range(256):
+#     # 				if i % step == 0:
+#     # 					list_color.append(colors.to_hex(cmap(i)[:3]))
+#     # 	else:
+#     # 		list_color = cmap_var
 
-    if not (ax or show or out):
-        raise Exception("[ERROR]: Either of the ax, show, and out must have a value.")
-    isAx = not ax
-    # if isinstance(assoc, str):
-    #     df_assoc = pd.read_csv(assoc, header=0, delim_whitespace=True)
-    # elif isinstance(assoc, pd.DataFrame):
-    #     df_assoc = assoc
-    # else:
-    #     raise Exception(
-    #         "[ERROR]: assoc must be either string(path) or pandas.DataFrame."
-    #     )
+#     if not (ax or show or out):
+#         raise Exception("[ERROR]: Either of the ax, show, and out must have a value.")
+#     isAx = not ax
+#     # if isinstance(assoc, str):
+#     #     df_assoc = pd.read_csv(assoc, header=0, delim_whitespace=True)
+#     # elif isinstance(assoc, pd.DataFrame):
+#     #     df_assoc = assoc
+#     # else:
+#     #     raise Exception(
+#     #         "[ERROR]: assoc must be either string(path) or pandas.DataFrame."
+#     #     )
 
-    # if col_chr not in df_assoc.columns:
-    #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_chr))
-    # if col_bp not in df_assoc.columns:
-    #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_bp))
-    # if col_p not in df_assoc.columns:
-    #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_p))
-    if col_snp not in df_assoc.columns:
-        print("[WARNING]: Column '{0}' not found!".format(col_snp))
+#     # if col_chr not in df_assoc.columns:
+#     #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_chr))
+#     # if col_bp not in df_assoc.columns:
+#     #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_bp))
+#     # if col_p not in df_assoc.columns:
+#     #     raise Exception("[ERROR]: Column '{0}' not found!".format(col_p))
+#     if col_snp not in df_assoc.columns:
+#         print("[WARNING]: Column '{0}' not found!".format(col_snp))
 
-    # df_assoc[col_chr] = df_assoc[col_chr].astype("category")
-    # df_assoc[col_bp] = df_assoc[col_bp].astype(int)
-    # df_assoc[col_p] = df_assoc[col_p].astype(float)
-    # df_assoc = df_assoc.sort_values([col_chr, col_bp])
-    # we are appeniding the number of variants for each chromosome to this list
-    chr_len = list()
+#     # df_assoc[col_chr] = df_assoc[col_chr].astype("category")
+#     # df_assoc[col_bp] = df_assoc[col_bp].astype(int)
+#     # df_assoc[col_p] = df_assoc[col_p].astype(float)
+#     # df_assoc = df_assoc.sort_values([col_chr, col_bp])
+#     # we are appeniding the number of variants for each chromosome to this list
+#     # chr_len = list()
 
-    for cChr in df_assoc[col_chr].unique():
-        chr_len.append(len(df_assoc[df_assoc[col_chr] == cChr]))
-    # We are then creaing a weight for the gaps by taking the min_value/100 and converting to an int
-    weight_gap = int(min(chr_len) / 100)
+#     # for cChr in df_assoc[col_chr].unique():
+#     #     chr_len.append(len(df_assoc[df_assoc[col_chr] == cChr]))
+#     # # We are then creaing a weight for the gaps by taking the min_value/100 and converting to an int
+#     # weight_gap = int(min(chr_len) / 100)
 
-    list_ind = list()
-    for cChr in df_assoc[col_chr].unique():
-        if len(list_ind) == 0:
-            last_ind = 0
-        else:
-            last_ind = (list_ind[-1] + 1) + (gap * weight_gap)
+#     # list_ind = list()
+#     # for cChr in df_assoc[col_chr].unique():
+#     #     if len(list_ind) == 0:
+#     #         last_ind = 0
+#     #     else:
+#     #         last_ind = (list_ind[-1] + 1) + (gap * weight_gap)
 
-        list_ind += [
-            last_ind + num for num in range(len(df_assoc[df_assoc[col_chr] == cChr]))
-        ]
+#     #     list_ind += [
+#     #         last_ind + num for num in range(len(df_assoc[df_assoc[col_chr] == cChr]))
+#     #     ]
 
-    df_assoc["IND"] = list_ind
-    df_assoc["LOG_P"] = -np.log10(df_assoc[col_p])
+#     # df_assoc["IND"] = list_ind
+#     # df_assoc["LOG_P"] = -np.log10(df_assoc[col_p])
 
-    if isAx:
-        fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 12))
-    else:
-        fig = ax.figure
+#     # if isAx:
+#     #     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 12))
+#     # else:
+#     #     fig = ax.figure
 
-    x_ticks, x_labels = list(), list()
+#     x_ticks, x_labels = list(), list()
 
-    for i, cChr in enumerate(df_assoc[col_chr].unique()):
-        ind = df_assoc[df_assoc[col_chr] == cChr]["IND"]
-        log_p = df_assoc[df_assoc[col_chr] == cChr]["LOG_P"]
+#     for i, cChr in enumerate(df_assoc[col_chr].unique()):
+#         ind = df_assoc[df_assoc[col_chr] == cChr]["IND"]
+#         log_p = df_assoc[df_assoc[col_chr] == cChr]["LOG_P"]
 
-        ax.scatter(
-            ind, log_p, marker=".", s=5, color=list_color[i % cmap_var], **kwargs
-        )
-        x_ticks.append(ind.iloc[0] + (ind.iloc[-1] - ind.iloc[0]) / 2)
-        x_labels.append(cChr)
+#         ax.scatter(
+#             ind, log_p, marker=".", s=5, color=list_color[i % cmap_var], **kwargs
+#         )
+#         x_ticks.append(ind.iloc[0] + (ind.iloc[-1] - ind.iloc[0]) / 2)
+#         x_labels.append(cChr)
 
-    x_padding = len(list_ind) / 20
-    xlim_min = list_ind[0] - x_padding
-    xlim_max = list_ind[-1] + x_padding
+#     x_padding = len(list_ind) / 20
+#     xlim_min = list_ind[0] - x_padding
+#     xlim_max = list_ind[-1] + x_padding
 
-    if suggestiveline:
-        ax.plot([xlim_min, xlim_max], [suggestiveline, suggestiveline], "b-")
-    if genomewideline:
-        ax.plot([xlim_min, xlim_max], [genomewideline, genomewideline], "r-")
-    ax.spines["right"].set_visible(False)
-    ax.spines["top"].set_visible(False)
-    ax.spines["bottom"].set_visible(False)
+#     if suggestiveline:
+#         ax.plot([xlim_min, xlim_max], [suggestiveline, suggestiveline], "b-")
+#     if genomewideline:
+#         ax.plot([xlim_min, xlim_max], [genomewideline, genomewideline], "r-")
+#     ax.spines["right"].set_visible(False)
+#     ax.spines["top"].set_visible(False)
+#     ax.spines["bottom"].set_visible(False)
 
-    ax.set_xticks(x_ticks)
-    ax.set_xticklabels(x_labels)
-    # ax.set_ylim(bottom=0,top=math.floor(1+max(df_assoc["LOG_P"])+(max(df_assoc["LOG_P"])/100)))
-    # ax.set_ylim(bottom=0,top=max(df_assoc["LOG_P"]))
-    ax.set_ylim(bottom=0)
-    ax.set_xlim([xlim_min, xlim_max])
+#     ax.set_xticks(x_ticks)
+#     ax.set_xticklabels(x_labels)
+#     # ax.set_ylim(bottom=0,top=math.floor(1+max(df_assoc["LOG_P"])+(max(df_assoc["LOG_P"])/100)))
+#     # ax.set_ylim(bottom=0,top=max(df_assoc["LOG_P"]))
+#     ax.set_ylim(bottom=0)
+#     ax.set_xlim([xlim_min, xlim_max])
 
-    ax.tick_params(axis="x", labelsize=xtick_size, labelrotation=xrotation)
-    ax.tick_params(axis="y", labelsize=ytick_size, labelrotation=yrotation)
+#     ax.tick_params(axis="x", labelsize=xtick_size, labelrotation=xrotation)
+#     ax.tick_params(axis="y", labelsize=ytick_size, labelrotation=yrotation)
 
-    ax.set_xlabel("Chromosomes", fontsize=label_size)
-    ax.set_ylabel(r"$-log_{10}(p)$", fontsize=label_size)
+#     ax.set_xlabel("Chromosomes", fontsize=label_size)
+#     ax.set_ylabel(r"$-log_{10}(p)$", fontsize=label_size)
 
-    if title:
-        ax.set_title(title, fontsize=title_size)
+#     if title:
+#         ax.set_title(title, fontsize=title_size)
 
-    if isAx:
-        fig.tight_layout()
+#     if isAx:
+#         fig.tight_layout()
 
-    if show:
-        plt.show()
+#     if show:
+#         plt.show()
 
-    if out:
-        plt.savefig(out, format="png")
+#     if out:
+#         plt.savefig(out, format="png")
 
-    if isAx:
-        plt.clf()
-        plt.close()
+#     if isAx:
+#         plt.clf()
+#         plt.close()
 
 
 def qqplot(
